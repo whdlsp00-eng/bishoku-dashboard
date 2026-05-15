@@ -23,6 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HISTORY_PATH = os.path.join(ROOT, "history.json")
 DATA_PATH = os.path.join(ROOT, "data.json")
 INDEX_PATH = os.path.join(ROOT, "index.html")
+PROMOTED_PATH = os.path.join(ROOT, "promoted_posts.json")
 
 FEED_METRICS = "reach,views,total_interactions,likes,comments,shares,saved,profile_visits,follows,profile_activity"
 REELS_METRICS = "reach,views,total_interactions,likes,comments,shares,saved"
@@ -226,18 +227,44 @@ def append_history(snap):
     return history
 
 
+def load_promoted_shortcodes():
+    """Load list of Instagram shortcodes that were boosted (manually maintained)."""
+    if not os.path.exists(PROMOTED_PATH):
+        return set()
+    try:
+        with open(PROMOTED_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return set(data.get("promoted", []))
+    except Exception as e:
+        print(f"[promoted] load failed: {e}", file=sys.stderr)
+        return set()
+
+
+def extract_shortcode(permalink):
+    """Extract Instagram shortcode from permalink URL."""
+    if not permalink:
+        return None
+    # https://www.instagram.com/p/DXoPcDAkr90/ or /reel/DXoPcDAkr90/
+    parts = permalink.rstrip("/").split("/")
+    return parts[-1] if parts else None
+
+
 def build_post_data(posts):
     """Convert API posts into JS-friendly objects."""
+    promoted = load_promoted_shortcodes()
     out = []
     for p in posts:
         ins = p.get("insights", {}) or {}
         caption = (p.get("caption") or "").split("\n")[0][:80]
+        permalink = p.get("permalink", "")
+        shortcode = extract_shortcode(permalink)
         out.append({
             "id": p["id"],
             "ts": (p.get("timestamp") or "")[:10],
             "type": "REELS" if p.get("media_product_type") == "REELS" else "FEED",
             "cap": caption,
-            "pl": p.get("permalink", ""),
+            "pl": permalink,
+            "ad": shortcode in promoted,
             "reach": ins.get("reach"),
             "views": ins.get("views"),
             "likes": ins.get("likes") if ins.get("likes") is not None else p.get("like_count"),
@@ -248,6 +275,7 @@ def build_post_data(posts):
             "pv": ins.get("profile_visits"),
             "fl": ins.get("follows"),
         })
+    print(f"[promoted] marked {sum(1 for p in out if p['ad'])} posts as boosted")
     return out
 
 
@@ -464,9 +492,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   tbody tr:hover {{ background:var(--surface-2); }}
   td {{ padding:8px; }}
   td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
-  .pill {{ display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:500; }}
+  .pill {{ display:inline-block; padding:2px 8px; border-radius:4px; font-size:10px; font-weight:500; margin-right:3px; }}
   .pill-reels {{ background:#EEEDFE; color:#3C3489; }}
   .pill-feed {{ background:#E1F5EE; color:#085041; }}
+  .pill-ad {{ background:#FAEEDA; color:#854F0B; }}
   .table-wrap {{ overflow-x:auto; background:var(--surface); border:1px solid var(--border); border-radius:10px; }}
   .insight-card {{ background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--accent); border-radius:8px; padding:12px 16px; margin-bottom:8px; }}
   .insight-card.spike {{ border-left-color:var(--warning); }}
@@ -495,7 +524,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 
   <div class="notice">
-    <strong>광고 데이터 안내</strong> · 게시물별 도달·조회수는 <b>오가닉만</b> 표시됩니다. 계정 일별 도달은 광고 효과가 합산된 값입니다. 광고 분리·광고비 수치를 보려면 Facebook Page Token + ads_read 스코프 추가 발급이 필요합니다.
+    <strong>광고 데이터 안내</strong> · 게시물별 도달·조회수는 Meta가 <b>오가닉 + 광고를 자동 합산</b>한 값입니다. 광고 집행한 게시물에는 <span style="background:#FAEEDA; color:#854F0B; padding:1px 6px; border-radius:3px; font-size:11px;">광고</span> 배지가 붙으며, <code>promoted_posts.json</code>에서 직접 등록할 수 있습니다.
   </div>
 
   <div class="date-controls">
@@ -705,7 +734,7 @@ function renderTable() {{
     const pillClass = p.type === 'REELS' ? 'pill-reels' : 'pill-feed';
     html += `<tr data-pl="${{p.pl}}">`;
     html += `<td>${{p.ts.substring(5)}}</td>`;
-    html += `<td><span class="pill ${{pillClass}}">${{p.type}}</span></td>`;
+    html += `<td><span class="pill ${{pillClass}}">${{p.type}}</span>${{p.ad?'<span class=\"pill pill-ad\">광고</span>':''}}</td>`;
     html += `<td style="max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${{(p.cap||'').replace(/</g,'&lt;')}}</td>`;
     ['reach','views','likes','comments','shares','saved','ti','pv','fl'].forEach(k => {{
       const v = p[k];
