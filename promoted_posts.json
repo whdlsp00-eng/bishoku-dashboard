@@ -1,0 +1,6 @@
+{
+  "_comment": "광고(보스팅)를 집행한 게시물의 Instagram shortcode를 아래 promoted 배열에 추가하세요. shortcode는 게시물 URL의 마지막 부분입니다. 예: https://www.instagram.com/p/DXoPcDAkr90/ → DXoPcDAkr90. 리스트에 추가된 게시물에는 대시보드에서 '광고' 배지가 표시됩니다. 게시물별 reach/views 수치는 Meta가 이미 광고+오가닉을 합산해서 반환하므로 별도 처리는 불필요합니다.",
+  "promoted": [
+    "DXoPcDAkr90"
+  ]
+}
