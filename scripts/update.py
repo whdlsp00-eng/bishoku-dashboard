@@ -385,6 +385,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .pill {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 500; }}
   .pill-reels {{ background: #EEEDFE; color: #3C3489; }}
   .pill-feed {{ background: #E1F5EE; color: #085041; }}
+  .post-summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); gap: 8px; margin: 12px 0 16px; }}
+  .post-summary .item {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }}
+  .post-summary .item-label {{ font-size: 11px; color: var(--text-2); }}
+  .post-summary .item-value {{ font-size: 18px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }}
+  .post-summary .item-avg {{ font-size: 10px; color: var(--text-3); margin-top: 1px; font-variant-numeric: tabular-nums; }}
   .table-wrap {{ overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }}
   .footer {{ margin-top: 40px; font-size: 11px; color: var(--text-3); }}
   .footer a {{ color: var(--text-2); }}
@@ -459,6 +464,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="chart-wrap"><div class="chart-canvas" style="height:260px;"><canvas id="typeChart" role="img" aria-label="REELS와 FEED 평균 성과 비교"></canvas></div></div>
 
   <h2>콘텐츠별 성과</h2>
+  <div class="muted" style="font-size:12px;">전체 {media_count}개 게시물 누적 — 합계 위, 평균 아래</div>
+  <div class="post-summary" id="postSummary"></div>
   <div class="muted" style="font-size:12px; margin-bottom:8px;">컬럼 클릭 시 정렬 · 행 클릭 시 인스타그램 원문 열기</div>
   <div class="table-wrap"><div id="postTable"></div></div>
 
@@ -545,6 +552,29 @@ new Chart(document.getElementById('cityChart'), {{
 
 // Table
 let sortKey = 'ts', sortDir = -1;
+const NUM_COLS = ['reach','views','likes','comments','shares','saved','ti','pv','fl'];
+function aggregates() {{
+  const sums = {{}}, avgs = {{}}, counts = {{}};
+  NUM_COLS.forEach(k => {{
+    const vals = DATA.posts.map(p => p[k]).filter(v => v != null && !isNaN(v));
+    sums[k] = vals.reduce((s,v) => s + v, 0);
+    counts[k] = vals.length;
+    avgs[k] = vals.length ? Math.round(sums[k] / vals.length) : null;
+  }});
+  return {{sums, avgs, counts}};
+}}
+function renderSummary() {{
+  const agg = aggregates();
+  const LABELS = {{reach:'도달', views:'조회수', likes:'좋아요', comments:'댓글', shares:'공유', saved:'저장', ti:'총 참여', pv:'프로필 방문', fl:'팔로우 전환'}};
+  let html = '';
+  NUM_COLS.forEach(k => {{
+    const sum = (agg.sums[k] || 0).toLocaleString();
+    const avg = agg.avgs[k] == null ? '-' : agg.avgs[k].toLocaleString();
+    html += `<div class="item"><div class="item-label">${{LABELS[k]}}</div><div class="item-value">${{sum}}</div><div class="item-avg">평균 ${{avg}}</div></div>`;
+  }});
+  document.getElementById('postSummary').innerHTML = html;
+}}
+renderSummary();
 function renderTable() {{
   const sorted = [...DATA.posts].sort((a,b) => {{
     const av = a[sortKey], bv = b[sortKey];
@@ -560,10 +590,27 @@ function renderTable() {{
     {{k:'shares', label:'공유', n:true}}, {{k:'saved', label:'저장', n:true}},
     {{k:'ti', label:'참여', n:true}}, {{k:'pv', label:'프로필', n:true}}, {{k:'fl', label:'팔로우', n:true}}
   ];
+  const agg = aggregates();
   let html = '<table><thead><tr>';
   cols.forEach(c => {{
     const arrow = sortKey === c.k ? (sortDir === 1 ? ' ↑' : ' ↓') : '';
     html += `<th data-k="${{c.k}}" style="text-align:${{c.n?'right':'left'}};">${{c.label}}${{arrow}}</th>`;
+  }});
+  html += '</tr>';
+  // Summary rows (in thead so they stay at top during sort)
+  const sumStyle = 'background:var(--surface-2); font-weight:500;';
+  html += `<tr style="${{sumStyle}}">`;
+  html += `<td colspan="3" style="padding:8px; font-size:12px;">합계 <span style="color:var(--text-3); font-weight:400;">(${{DATA.posts.length}}개 게시물)</span></td>`;
+  NUM_COLS.forEach(k => {{
+    html += `<td class="num" style="padding:8px;">${{agg.sums[k].toLocaleString()}}</td>`;
+  }});
+  html += '</tr>';
+  html += `<tr style="${{sumStyle}} border-bottom:2px solid var(--border);">`;
+  html += `<td colspan="3" style="padding:8px; font-size:12px;">평균 <span style="color:var(--text-3); font-weight:400;">(콘텐츠당)</span></td>`;
+  NUM_COLS.forEach(k => {{
+    const v = agg.avgs[k];
+    const disp = v == null ? '<span style="color:var(--text-3);">-</span>' : v.toLocaleString();
+    html += `<td class="num" style="padding:8px;">${{disp}}</td>`;
   }});
   html += '</tr></thead><tbody>';
   sorted.forEach(p => {{
