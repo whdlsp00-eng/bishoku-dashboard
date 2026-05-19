@@ -274,6 +274,12 @@ def fetch_promoted_via_marketing_api():
             next_url = (j.get("paging") or {}).get("next")
             pages += 1
         print(f"[marketing] auto-detected {len(media_ids)} promoted media IDs, {len(shortcodes)} shortcodes from {pages} page(s) of ads")
+        if media_ids:
+            sample = list(media_ids)[:10]
+            print(f"[marketing] sample media IDs: {sample}")
+        if shortcodes:
+            sample = list(shortcodes)[:10]
+            print(f"[marketing] sample shortcodes: {sample}")
     except error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         print(f"[marketing] HTTP {e.code}: {body[:400]}", file=sys.stderr)
@@ -323,7 +329,20 @@ def build_post_data(posts):
             "pv": ins.get("profile_visits"),
             "fl": ins.get("follows"),
         })
-    print(f"[promoted] flagged {sum(1 for p in out if p['ad'])} posts (manual={len(manual_promoted)}, auto-detected media IDs={len(auto_media_ids)}, auto-detected shortcodes={len(auto_shortcodes)})")
+    matched_count = sum(1 for p in out if p['ad'])
+    print(f"[promoted] flagged {matched_count} posts (manual={len(manual_promoted)}, auto-detected media IDs={len(auto_media_ids)}, auto-detected shortcodes={len(auto_shortcodes)})")
+    if matched_count == 0 and (auto_media_ids or auto_shortcodes):
+        sample_post_ids = [str(p["id"]) for p in posts[:5]]
+        sample_post_shortcodes = [extract_shortcode(p.get("permalink", "")) for p in posts[:5]]
+        print(f"[promoted] DEBUG: sample post IDs: {sample_post_ids}")
+        print(f"[promoted] DEBUG: sample post shortcodes: {sample_post_shortcodes}")
+        print(f"[promoted] DEBUG: auto media IDs sample: {list(auto_media_ids)[:5]}")
+        print(f"[promoted] DEBUG: auto shortcodes sample: {list(auto_shortcodes)[:5]}")
+        # Try fuzzy match check
+        matching_ids = set(str(p["id"]) for p in posts) & auto_media_ids
+        matching_sc = set(extract_shortcode(p.get("permalink", "")) for p in posts if p.get("permalink")) & auto_shortcodes
+        print(f"[promoted] DEBUG: ID intersection: {matching_ids}")
+        print(f"[promoted] DEBUG: shortcode intersection: {matching_sc}")
     return out
 
 
