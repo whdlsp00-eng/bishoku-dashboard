@@ -59,6 +59,15 @@ def refresh_token():
     return None
 
 
+def fetch_individual_post(media_id):
+    """Fetch single Instagram media record by ID (used for posts not returned by /me/media)."""
+    try:
+        return api_get(f"/{media_id}", {"fields": "id,caption,media_type,media_product_type,permalink,timestamp,like_count,comments_count,thumbnail_url,media_url"})
+    except Exception as e:
+        print(f"[individual-post] failed for {media_id}: {e}", file=sys.stderr)
+        return None
+
+
 def fetch_post_insights(media_id, product_type):
     metrics = REELS_METRICS if product_type == "REELS" else FEED_METRICS
     try:
@@ -196,6 +205,20 @@ def fetch_all():
         posts.extend(j.get("data", []))
     print(f"[media] {len(posts)} posts")
 
+    # Add promoted posts from Marketing API that aren't in /me/media (dark posts or older posts not indexed)
+    promoted_media_ids, promoted_shortcodes = fetch_promoted_via_marketing_api()
+    existing_ids = {p["id"] for p in posts}
+    missing_ids = promoted_media_ids - existing_ids
+    if missing_ids:
+        print(f"[ads-supplement] fetching {len(missing_ids)} promoted posts missing from /me/media")
+        for mid in missing_ids:
+            extra = fetch_individual_post(mid)
+            if extra:
+                posts.append(extra)
+        print(f"[ads-supplement] total posts after supplement: {len(posts)}")
+    snap["promoted_media_ids"] = list(promoted_media_ids)
+    snap["promoted_shortcodes"] = list(promoted_shortcodes)
+
     for p in posts:
         p["insights"] = fetch_post_insights(p["id"], p.get("media_product_type"))
     snap["posts"] = posts
@@ -297,10 +320,17 @@ def extract_shortcode(permalink):
     return parts[-1] if parts else None
 
 
-def build_post_data(posts):
-    """Convert API posts into JS-friendly objects, flagging promoted posts."""
+def build_post_data(posts, auto_media_ids=None, auto_shortcodes=None):
+    """Convert API posts into JS-friendly objects, flagging promoted posts.
+
+    If auto_media_ids/auto_shortcodes are provided, use them (already fetched in fetch_all).
+    Otherwise, fall back to fetching from Marketing API (for backward compatibility).
+    """
     manual_promoted = load_promoted_shortcodes()
-    auto_media_ids, auto_shortcodes = fetch_promoted_via_marketing_api()
+    if auto_media_ids is None or auto_shortcodes is None:
+        auto_media_ids, auto_shortcodes = fetch_promoted_via_marketing_api()
+    auto_media_ids = set(auto_media_ids)
+    auto_shortcodes = set(auto_shortcodes)
     out = []
     for p in posts:
         ins = p.get("insights", {}) or {}
@@ -433,7 +463,11 @@ def compute_insights(daily_reach, posts, history):
 
 def render_html(snap, history):
     acct = snap["account"]
-    posts_data = build_post_data(snap["posts"])
+    posts_data = build_post_data(
+        snap["posts"],
+        auto_media_ids=snap.get("promoted_media_ids") or [],
+        auto_shortcodes=snap.get("promoted_shortcodes") or [],
+    )
     daily = snap.get("daily_reach", {}) or {}
     demo = snap.get("demographics", {}) or {}
 
