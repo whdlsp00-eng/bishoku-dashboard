@@ -19,6 +19,7 @@ import html as html_module
 from urllib import request, parse, error
 
 API_BASE = "https://graph.instagram.com/v23.0"
+FB_API_BASE = "https://graph.facebook.com/v23.0"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HISTORY_PATH = os.path.join(ROOT, "history.json")
 DATA_PATH = os.path.join(ROOT, "data.json")
@@ -240,6 +241,47 @@ def load_promoted_shortcodes():
         return set()
 
 
+def fetch_promoted_via_marketing_api():
+    """Auto-detect promoted Instagram posts via Meta Marketing API.
+
+    Requires FB_PAGE_TOKEN (with ads_read scope) and FB_AD_ACCOUNT_ID env vars.
+    Returns (set of IG media IDs, set of IG shortcodes) that have been promoted.
+    """
+    fb_token = os.environ.get("FB_PAGE_TOKEN")
+    ad_account = os.environ.get("FB_AD_ACCOUNT_ID")
+    if not fb_token or not ad_account:
+        print("[marketing] FB_PAGE_TOKEN/FB_AD_ACCOUNT_ID not set, skipping auto-detection")
+        return set(), set()
+
+    media_ids = set()
+    shortcodes = set()
+    next_url = f"{FB_API_BASE}/{ad_account}/ads?{parse.urlencode({'fields': 'creative{instagram_permalink_url,effective_instagram_media_id}', 'limit': 200, 'access_token': fb_token})}"
+    pages = 0
+    try:
+        while next_url and pages < 20:  # safety cap
+            with request.urlopen(next_url, timeout=30) as resp:
+                j = json.loads(resp.read().decode("utf-8"))
+            for ad in j.get("data", []):
+                creative = ad.get("creative") or {}
+                mid = creative.get("effective_instagram_media_id")
+                if mid:
+                    media_ids.add(str(mid))
+                permalink = creative.get("instagram_permalink_url", "")
+                if permalink:
+                    sc = extract_shortcode(permalink)
+                    if sc:
+                        shortcodes.add(sc)
+            next_url = (j.get("paging") or {}).get("next")
+            pages += 1
+        print(f"[marketing] auto-detected {len(media_ids)} promoted media IDs, {len(shortcodes)} shortcodes from {pages} page(s) of ads")
+    except error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(f"[marketing] HTTP {e.code}: {body[:400]}", file=sys.stderr)
+    except Exception as e:
+        print(f"[marketing] fetch failed: {e}", file=sys.stderr)
+    return media_ids, shortcodes
+
+
 def extract_shortcode(permalink):
     """Extract Instagram shortcode from permalink URL."""
     if not permalink:
@@ -250,21 +292,27 @@ def extract_shortcode(permalink):
 
 
 def build_post_data(posts):
-    """Convert API posts into JS-friendly objects."""
-    promoted = load_promoted_shortcodes()
+    """Convert API posts into JS-friendly objects, flagging promoted posts."""
+    manual_promoted = load_promoted_shortcodes()
+    auto_media_ids, auto_shortcodes = fetch_promoted_via_marketing_api()
     out = []
     for p in posts:
         ins = p.get("insights", {}) or {}
         caption = (p.get("caption") or "").split("\n")[0][:80]
         permalink = p.get("permalink", "")
         shortcode = extract_shortcode(permalink)
+        is_ad = (
+            (shortcode and shortcode in manual_promoted)
+            or (shortcode and shortcode in auto_shortcodes)
+            or str(p["id"]) in auto_media_ids
+        )
         out.append({
             "id": p["id"],
             "ts": (p.get("timestamp") or "")[:10],
             "type": "REELS" if p.get("media_product_type") == "REELS" else "FEED",
             "cap": caption,
             "pl": permalink,
-            "ad": shortcode in promoted,
+            "ad": is_ad,
             "reach": ins.get("reach"),
             "views": ins.get("views"),
             "likes": ins.get("likes") if ins.get("likes") is not None else p.get("like_count"),
@@ -275,7 +323,7 @@ def build_post_data(posts):
             "pv": ins.get("profile_visits"),
             "fl": ins.get("follows"),
         })
-    print(f"[promoted] marked {sum(1 for p in out if p['ad'])} posts as boosted")
+    print(f"[promoted] flagged {sum(1 for p in out if p['ad'])} posts (manual={len(manual_promoted)}, auto-detected media IDs={len(auto_media_ids)}, auto-detected shortcodes={len(auto_shortcodes)})")
     return out
 
 
@@ -524,7 +572,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 
   <div class="notice">
-    <strong>광고 데이터 안내</strong> · 게시물별 도달·조회수는 Meta가 <b>오가닉 + 광고를 자동 합산</b>한 값입니다. 광고 집행한 게시물에는 <span style="background:#FAEEDA; color:#854F0B; padding:1px 6px; border-radius:3px; font-size:11px;">광고</span> 배지가 붙으며, <code>promoted_posts.json</code>에서 직접 등록할 수 있습니다.
+    <strong>광고 데이터 안내</strong> · 게시물별 도달·조회수는 Meta가 <b>오가닉 + 광고를 자동 합산</b>한 값입니다. 광고 집행한 게시물에는 <span style="background:#FAEEDA; color:#854F0B; padding:1px 6px; border-radius:3px; font-size:11px;">광고</span> 배지가 자동 표시됩니다 (Meta Marketing API 연동).
   </div>
 
   <div class="date-controls">

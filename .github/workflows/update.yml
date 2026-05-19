@@ -35,6 +35,8 @@ jobs:
       - name: Run update script
         env:
           BISHOKU_MONO_API_KEY: ${{ secrets.BISHOKU_MONO_API_KEY }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          FB_AD_ACCOUNT_ID: ${{ secrets.FB_AD_ACCOUNT_ID }}
         run: python scripts/update.py
 
       - name: Commit and push if changed
