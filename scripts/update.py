@@ -206,7 +206,7 @@ def fetch_all():
     print(f"[media] {len(posts)} posts")
 
     # Add promoted posts from Marketing API that aren't in /me/media (dark posts or older posts not indexed)
-    promoted_media_ids, promoted_shortcodes = fetch_promoted_via_marketing_api()
+    promoted_media_ids, promoted_shortcodes, ad_insights = fetch_promoted_via_marketing_api()
     existing_ids = {p["id"] for p in posts}
     missing_ids = promoted_media_ids - existing_ids
     if missing_ids:
@@ -214,10 +214,12 @@ def fetch_all():
         for mid in missing_ids:
             extra = fetch_individual_post(mid)
             if extra:
+                extra["__dark"] = True  # mark for later merge into organic
                 posts.append(extra)
         print(f"[ads-supplement] total posts after supplement: {len(posts)}")
     snap["promoted_media_ids"] = list(promoted_media_ids)
     snap["promoted_shortcodes"] = list(promoted_shortcodes)
+    snap["ad_insights"] = ad_insights
 
     for p in posts:
         p["insights"] = fetch_post_insights(p["id"], p.get("media_product_type"))
@@ -265,23 +267,33 @@ def load_promoted_shortcodes():
 
 
 def fetch_promoted_via_marketing_api():
-    """Auto-detect promoted Instagram posts via Meta Marketing API.
+    """Fetch promoted Instagram posts + ad campaign insights via Meta Marketing API.
 
     Requires FB_PAGE_TOKEN (with ads_read scope) and FB_AD_ACCOUNT_ID env vars.
-    Returns (set of IG media IDs, set of IG shortcodes) that have been promoted.
+    Returns (media_ids, shortcodes, ad_insights_by_media_id).
+
+    ad_insights_by_media_id: dict mapping dark post IG media ID -> aggregated paid metrics:
+        {"reach": int, "impressions": int, "clicks": int}
+    Multiple ads targeting same dark post are summed together.
     """
     fb_token = os.environ.get("FB_PAGE_TOKEN")
     ad_account = os.environ.get("FB_AD_ACCOUNT_ID")
     if not fb_token or not ad_account:
         print("[marketing] FB_PAGE_TOKEN/FB_AD_ACCOUNT_ID not set, skipping auto-detection")
-        return set(), set()
+        return set(), set(), {}
 
     media_ids = set()
     shortcodes = set()
-    next_url = f"{FB_API_BASE}/{ad_account}/ads?{parse.urlencode({'fields': 'creative{instagram_permalink_url,effective_instagram_media_id}', 'limit': 200, 'access_token': fb_token})}"
+    ad_insights = {}
+    params = {
+        "fields": "creative{instagram_permalink_url,effective_instagram_media_id},insights{reach,impressions,clicks,inline_link_clicks}",
+        "limit": 200,
+        "access_token": fb_token,
+    }
+    next_url = f"{FB_API_BASE}/{ad_account}/ads?{parse.urlencode(params)}"
     pages = 0
     try:
-        while next_url and pages < 20:  # safety cap
+        while next_url and pages < 20:
             with request.urlopen(next_url, timeout=30) as resp:
                 j = json.loads(resp.read().decode("utf-8"))
             for ad in j.get("data", []):
@@ -294,21 +306,26 @@ def fetch_promoted_via_marketing_api():
                     sc = extract_shortcode(permalink)
                     if sc:
                         shortcodes.add(sc)
+                # Aggregate paid insights by dark post media ID
+                if mid:
+                    ins_data = (ad.get("insights") or {}).get("data") or []
+                    if ins_data:
+                        ins = ins_data[0]
+                        key = str(mid)
+                        if key not in ad_insights:
+                            ad_insights[key] = {"reach": 0, "impressions": 0, "clicks": 0}
+                        ad_insights[key]["reach"] += int(ins.get("reach", 0) or 0)
+                        ad_insights[key]["impressions"] += int(ins.get("impressions", 0) or 0)
+                        ad_insights[key]["clicks"] += int(ins.get("clicks", 0) or 0)
             next_url = (j.get("paging") or {}).get("next")
             pages += 1
-        print(f"[marketing] auto-detected {len(media_ids)} promoted media IDs, {len(shortcodes)} shortcodes from {pages} page(s) of ads")
-        if media_ids:
-            sample = list(media_ids)[:10]
-            print(f"[marketing] sample media IDs: {sample}")
-        if shortcodes:
-            sample = list(shortcodes)[:10]
-            print(f"[marketing] sample shortcodes: {sample}")
+        print(f"[marketing] {len(media_ids)} media IDs, {len(shortcodes)} shortcodes, insights for {len(ad_insights)} dark posts from {pages} page(s)")
     except error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         print(f"[marketing] HTTP {e.code}: {body[:400]}", file=sys.stderr)
     except Exception as e:
         print(f"[marketing] fetch failed: {e}", file=sys.stderr)
-    return media_ids, shortcodes
+    return media_ids, shortcodes, ad_insights
 
 
 def extract_shortcode(permalink):
@@ -320,25 +337,31 @@ def extract_shortcode(permalink):
     return parts[-1] if parts else None
 
 
-def build_post_data(posts, auto_media_ids=None, auto_shortcodes=None):
-    """Convert API posts into JS-friendly objects, flagging promoted posts.
+def normalize_caption(c):
+    """Strip whitespace, take first 40 chars for caption matching."""
+    return (c or "").strip()[:40].lower()
 
-    If auto_media_ids/auto_shortcodes are provided, use them (already fetched in fetch_all).
-    Otherwise, fall back to fetching from Marketing API (for backward compatibility).
-    """
+
+def build_post_data(posts, auto_media_ids=None, auto_shortcodes=None, ad_insights=None):
+    """Convert API posts into JS-friendly objects, flagging promoted posts,
+    and merging dark (ad-only) posts into their organic counterparts."""
     manual_promoted = load_promoted_shortcodes()
     if auto_media_ids is None or auto_shortcodes is None:
-        auto_media_ids, auto_shortcodes = fetch_promoted_via_marketing_api()
+        auto_media_ids, auto_shortcodes, ad_insights = fetch_promoted_via_marketing_api()
     auto_media_ids = set(auto_media_ids)
     auto_shortcodes = set(auto_shortcodes)
+    ad_insights = ad_insights or {}
+
     out = []
     for p in posts:
         ins = p.get("insights", {}) or {}
         caption = (p.get("caption") or "").split("\n")[0][:80]
         permalink = p.get("permalink", "")
         shortcode = extract_shortcode(permalink)
+        is_dark = bool(p.get("__dark"))
         is_ad = (
-            (shortcode and shortcode in manual_promoted)
+            is_dark
+            or (shortcode and shortcode in manual_promoted)
             or (shortcode and shortcode in auto_shortcodes)
             or str(p["id"]) in auto_media_ids
         )
@@ -349,6 +372,7 @@ def build_post_data(posts, auto_media_ids=None, auto_shortcodes=None):
             "cap": caption,
             "pl": permalink,
             "ad": is_ad,
+            "_dark": is_dark,
             "reach": ins.get("reach"),
             "views": ins.get("views"),
             "likes": ins.get("likes") if ins.get("likes") is not None else p.get("like_count"),
@@ -359,21 +383,70 @@ def build_post_data(posts, auto_media_ids=None, auto_shortcodes=None):
             "pv": ins.get("profile_visits"),
             "fl": ins.get("follows"),
         })
-    matched_count = sum(1 for p in out if p['ad'])
-    print(f"[promoted] flagged {matched_count} posts (manual={len(manual_promoted)}, auto-detected media IDs={len(auto_media_ids)}, auto-detected shortcodes={len(auto_shortcodes)})")
-    if matched_count == 0 and (auto_media_ids or auto_shortcodes):
-        sample_post_ids = [str(p["id"]) for p in posts[:5]]
-        sample_post_shortcodes = [extract_shortcode(p.get("permalink", "")) for p in posts[:5]]
-        print(f"[promoted] DEBUG: sample post IDs: {sample_post_ids}")
-        print(f"[promoted] DEBUG: sample post shortcodes: {sample_post_shortcodes}")
-        print(f"[promoted] DEBUG: auto media IDs sample: {list(auto_media_ids)[:5]}")
-        print(f"[promoted] DEBUG: auto shortcodes sample: {list(auto_shortcodes)[:5]}")
-        # Try fuzzy match check
-        matching_ids = set(str(p["id"]) for p in posts) & auto_media_ids
-        matching_sc = set(extract_shortcode(p.get("permalink", "")) for p in posts if p.get("permalink")) & auto_shortcodes
-        print(f"[promoted] DEBUG: ID intersection: {matching_ids}")
-        print(f"[promoted] DEBUG: shortcode intersection: {matching_sc}")
-    return out
+
+    # Merge dark posts into their organic counterparts (caption-based matching)
+    dark_posts = [p for p in out if p["_dark"]]
+    organic_posts = [p for p in out if not p["_dark"]]
+    organic_by_cap = {}
+    for p in organic_posts:
+        key = normalize_caption(p["cap"])
+        if key:
+            organic_by_cap.setdefault(key, []).append(p)
+
+    merged_count = 0
+    orphan_count = 0
+    for dark in dark_posts:
+        cap_key = normalize_caption(dark["cap"])
+        candidates = organic_by_cap.get(cap_key, []) if cap_key else []
+        # Pick organic post closest in time (within 7 days)
+        match = None
+        if candidates:
+            try:
+                d_dt = dt.date.fromisoformat(dark["ts"])
+                best_delta = 999
+                for cand in candidates:
+                    try:
+                        c_dt = dt.date.fromisoformat(cand["ts"])
+                        delta = abs((d_dt - c_dt).days)
+                        if delta < best_delta:
+                            best_delta = delta
+                            match = cand
+                    except Exception:
+                        continue
+                if best_delta > 30:
+                    match = None  # too far apart to be the same content
+            except Exception:
+                match = candidates[0]
+
+        ad_ins = ad_insights.get(str(dark["id"]), {})
+        if match:
+            # Merge dark post's likes/comments + paid insights into matched organic
+            if dark.get("likes"):
+                match["likes"] = (match["likes"] or 0) + dark["likes"]
+            if dark.get("comments"):
+                match["comments"] = (match["comments"] or 0) + dark["comments"]
+            if ad_ins.get("reach"):
+                match["reach"] = (match["reach"] or 0) + ad_ins["reach"]
+            if ad_ins.get("impressions"):
+                match["views"] = (match["views"] or 0) + ad_ins["impressions"]
+            match["ad"] = True
+            merged_count += 1
+        else:
+            # No matching organic — keep as standalone with paid insights filled in
+            if ad_ins.get("reach"):
+                dark["reach"] = ad_ins["reach"]
+            if ad_ins.get("impressions"):
+                dark["views"] = ad_ins["impressions"]
+            organic_posts.append(dark)
+            orphan_count += 1
+
+    # Clean up internal flag
+    for p in organic_posts:
+        p.pop("_dark", None)
+
+    flagged = sum(1 for p in organic_posts if p["ad"])
+    print(f"[promoted] merged {merged_count} dark posts into organic, {orphan_count} standalone ad posts, {flagged} total flagged with 광고 badge")
+    return organic_posts
 
 
 def compute_insights(daily_reach, posts, history):
@@ -467,6 +540,7 @@ def render_html(snap, history):
         snap["posts"],
         auto_media_ids=snap.get("promoted_media_ids") or [],
         auto_shortcodes=snap.get("promoted_shortcodes") or [],
+        ad_insights=snap.get("ad_insights") or {},
     )
     daily = snap.get("daily_reach", {}) or {}
     demo = snap.get("demographics", {}) or {}
